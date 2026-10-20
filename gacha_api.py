@@ -1,5 +1,5 @@
 # 找抽卡链接（读游戏缓存）+ 从米哈游接口拉取记录
-import os, re, json, time, glob, urllib.request, urllib.parse
+import os, re, json, time, glob, functools, urllib.request, urllib.parse
 
 # 卡池：gacha_type -> (名称, 保底抽数, 接口)
 POOLS = {
@@ -15,8 +15,10 @@ LOG_DIRS = [os.path.expandvars(r'%USERPROFILE%\AppData\LocalLow\miHoYo\崩坏：
             os.path.expandvars(r'%USERPROFILE%\AppData\LocalLow\Cognosphere\Star Rail')]
 URL_RE = re.compile(rb'https://[^\x00\s"<>]+?/get(?:Ld)?GachaLog\?[^\x00\s"<>]+')
 
-# 米哈游是国内服务器，走代理反而连不上，所以一律直连
-_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+@functools.cache
+def _opener():
+    """米哈游是国内服务器，走代理反而连不上，所以一律直连。用到时才建（建的时候要加载 HTTPS 证书，启动时省下这点时间）。"""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class GachaError(Exception):
@@ -68,7 +70,7 @@ def _get(base, query, path, gacha_type, end_id):
     url = urllib.parse.urlunsplit((base.scheme, base.netloc, path, urllib.parse.urlencode(q), ''))
     for attempt in range(6):
         try:
-            with _opener.open(url, timeout=15) as r:
+            with _opener().open(url, timeout=15) as r:
                 resp = json.load(r)
         except Exception as e:
             if attempt == 5:

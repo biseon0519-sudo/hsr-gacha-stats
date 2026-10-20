@@ -50,15 +50,11 @@ def describe(f, hard):
     return '\n'.join(l for l in lines if l)
 
 
-def draw_cover(p, pm, rect, align_top=False):
-    """把图片按“铺满并居中裁切”的方式画进 rect。"""
-    if pm is None or pm.isNull():
-        return
-    s = max(rect.width() / pm.width(), rect.height() / pm.height())
-    w, h = rect.width() / s, rect.height() / s
-    x = (pm.width() - w) / 2
-    y = 0 if align_top else (pm.height() - h) / 2
-    p.drawPixmap(rect, pm, QRectF(x, y, w, h))
+def draw_cover(p, kind, f, rect, align_top=False):
+    """把 f 的头像/海报按“铺满并居中裁切”的方式画进 rect。缩好的图按尺寸缓存，重画时直接贴。"""
+    pm = images().cover(kind, f.item_id, f.name, rect.width(), rect.height(), p.device().devicePixelRatioF(), align_top)
+    if pm is not None:
+        p.drawPixmap(rect, pm, QRectF())
 
 
 def draw_stamp(p, center, r):
@@ -94,7 +90,7 @@ def draw_tile(p, rect, img_h, f, text, color, font, radius=10):
         q = QFont(FONT); q.setPixelSize(int(img_h * 0.55)); q.setBold(True)
         p.setFont(q); p.setPen(QColor(255, 255, 255, 230)); p.drawText(img, Qt.AlignCenter, '?')
     else:
-        draw_cover(p, images().get('avatar', f.item_id, f.name), img)
+        draw_cover(p, 'avatar', f, img)
     p.fillRect(label, QColor('#3a3631') if isDarkTheme() else QColor('#f4efe6'))
     p.restore()
     p.setFont(font); p.setPen(color)
@@ -223,16 +219,19 @@ class PosterFlow(_Themed):
         super().__init__(parent)
         self.setFocusPolicy(Qt.StrongFocus)
         self.fives, self.pos = [], 0.0
-        self._scaled = {}
+        self._scaled = {}                     # 画好的卡片、阴影、遮罩
         self._drag = None
         self.anim = QVariantAnimation(self)
         self.anim.setEasingCurve(QEasingCurve.OutCubic)
         self.anim.setDuration(420)
         self.anim.valueChanged.connect(self._set_pos)
+        self.anim.finished.connect(self.update)          # 停下来后用平滑缩放再画一遍
+        images().updated.connect(self._scaled.clear)     # 新图下好了，卡片要重画
         self.setMinimumHeight(360)
 
     def set_data(self, fives):
         self.fives = list(fives)
+        self._scaled.clear()
         self.anim.stop()
         self._set_pos(float(max(0, len(self.fives) - 1)))
 
@@ -285,94 +284,138 @@ class PosterFlow(_Themed):
         return QRectF(x - cw * s / 2, top, cw * s, ch * s), s
 
     # ---------- 绘制 ----------
-    def _poster(self, f, w, h):
-        pm = images().get('poster', f.item_id, f.name)
+    # 每张卡片（海报、文字、歪章）只在两种尺寸（中间 / 两边）下各画一次存成图，拖动时直接贴图，不再每帧缩放和画字；
+    # 正在拖动或动画中关掉平滑缩放，停下来再画一遍清晰的。
+    SHADOW = 8
+
+    def _cached(self, key, make):
+        pm = self._scaled.get(key)
         if pm is None:
-            pm = images().get('avatar', f.item_id, f.name)
-        if pm is None:
-            return None
-        key = (pm.cacheKey(), int(w), int(h))
-        out = self._scaled.get(key)
-        if out is None:
-            ratio = self.devicePixelRatioF()
-            out = QPixmap(int(w * ratio), int(h * ratio)); out.setDevicePixelRatio(ratio)
-            out.fill(Qt.transparent)
-            q = QPainter(out); q.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-            draw_cover(q, pm, QRectF(0, 0, w, h), align_top=True)
-            q.end()
             if len(self._scaled) > 80:
                 self._scaled.clear()
-            self._scaled[key] = out
-        return out
+            pm = self._scaled[key] = make()
+        return pm
+
+    def _canvas(self, w, h):
+        ratio = self.devicePixelRatioF()
+        pm = QPixmap(max(1, round(w * ratio)), max(1, round(h * ratio)))
+        pm.setDevicePixelRatio(ratio); pm.fill(Qt.transparent)
+        q = QPainter(pm); q.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
+        return pm, q
+
+    def _card(self, f, s):
+        cw, ch = self._size()
+        return self._cached(('card', f.key or id(f), f.item_id, round(cw), s), lambda: self._render_card(f, cw * s, ch * s, s))
+
+    def _render_card(self, f, w, h, s):
+        pm, p = self._canvas(w, h)
+        rect = QRectF(0, 0, w, h)
+        path = QPainterPath(); path.addRoundedRect(rect, 22 * s, 22 * s)
+        g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        g.setColorAt(0, QColor('#2b2f4a')); g.setColorAt(1, QColor('#5a4632'))
+        p.fillPath(path, g)
+        p.setClipPath(path)
+        kind = 'poster' if images().get('poster', f.item_id, f.name) is not None else 'avatar'
+        draw_cover(p, kind, f, rect, align_top=True)
+        # 底部渐变压暗，放文字
+        bottom = QRectF(0, h - h * 0.34, w, h * 0.34)
+        bg = QLinearGradient(bottom.topLeft(), bottom.bottomLeft())
+        bg.setColorAt(0, QColor(0, 0, 0, 0)); bg.setColorAt(1, QColor(0, 0, 0, 200))
+        p.fillRect(bottom, bg)
+        pad = 18 * s
+        big = QFont(FONT); big.setPixelSize(int(26 * s)); big.setBold(True)
+        p.setFont(big); p.setPen(QColor(255, 255, 255))
+        p.drawText(QRectF(pad, h - 84 * s, w - 2 * pad, 36 * s), Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetrics(big).elidedText(f.name, Qt.ElideRight, int(w - 2 * pad)))
+        small = QFont(FONT); small.setPixelSize(int(13 * s)); p.setFont(small); p.setPen(QColor(255, 255, 255, 190))
+        line = SHORT.get(f.gacha_type, '') + (f' · {f.time[:10]}' if f.time else '')    # 没有时间就只写卡池
+        p.drawText(QRectF(pad, h - 46 * s, w - 2 * pad, 24 * s), Qt.AlignLeft | Qt.AlignVCenter, line)
+        # 右下角：抽数 + “抽”，和卡池那行底边对齐；歪没歪只看右上角的章
+        base = h - 28 * s
+        unit = QFont(FONT); unit.setPixelSize(int(12 * s))
+        num = QFont(FONT); num.setPixelSize(int(30 * s)); num.setBold(True)
+        ux = w - pad - QFontMetrics(unit).horizontalAdvance('抽')
+        p.setFont(unit); p.setPen(QColor(255, 255, 255, 190))
+        p.drawText(QPointF(ux, base), '抽')
+        hard = POOLS.get(f.gacha_type, ('', 90))[1]
+        c = QColor(luck_color(f.pulls, hard) if f.pulls else QColor(255, 255, 255)).lighter(125)
+        p.setFont(num); p.setPen(c)
+        p.drawText(QPointF(ux - 3 * s - QFontMetrics(num).horizontalAdvance(pulls_text(f)), base), pulls_text(f))
+        if f.result == '歪':
+            draw_stamp(p, QPointF(w - 40 * s, 42 * s), 30 * s)
+        p.end()
+        return pm
+
+    def _shadow(self, s):
+        cw, ch = self._size()
+        m = self.SHADOW
+
+        def make():
+            pm, p = self._canvas(cw * s + 2 * m, ch * s + 2 * m)
+            r = QRectF(m, m, cw * s, ch * s)
+            for k in range(6):
+                sh = QPainterPath(); sh.addRoundedRect(r.adjusted(-k, -k + 4, k, k + 6), 22 + k, 22 + k)
+                p.fillPath(sh, QColor(0, 0, 0, 10))
+            p.end()
+            return pm
+        return self._cached(('shadow', round(cw), s), make)
+
+    def _mask(self, s):
+        """遮暗用的黑色圆角卡片形状，按透明度叠在两边的卡片上。"""
+        cw, ch = self._size()
+
+        def make():
+            pm, p = self._canvas(cw * s, ch * s)
+            path = QPainterPath(); path.addRoundedRect(QRectF(0, 0, cw * s, ch * s), 22 * s, 22 * s)
+            p.fillPath(path, QColor(0, 0, 0)); p.end()
+            return pm
+        return self._cached(('mask', round(cw), s), make)
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
         if not self.fives:
             p.setPen(ink(0.5)); p.drawText(self.rect(), Qt.AlignCenter, '还没有五星'); return
-        cw, ch = self._size()
-        for i in self._visible():
+        moving = self.anim.state() == QVariantAnimation.Running or (self._drag is not None and self._drag[2])
+        p.setRenderHint(QPainter.SmoothPixmapTransform, not moving)
+        order = self._visible()
+        rects = {i: self._card_rect(i) for i in order}
+        for i in order:
             f = self.fives[i]
-            rect, s = self._card_rect(i)
+            rect, s = rects[i]
             _, _, dim = self._place(i - self.pos)
-            hard = POOLS.get(f.gacha_type, ('', 90))[1]
+            base = 1.0 if s > (1 + self.SIDE) / 2 else self.SIDE        # 用两种预先画好的尺寸里最接近的那个
+            if abs(s - base) < 1e-6:                                      # 尺寸正好：对齐到整像素，直接贴图不缩放
+                rect = QRectF(round(rect.x()), round(rect.y()), rect.width(), rect.height())
+            # 两边叠着的卡片大部分被里面那张盖住，只画露出来的那一条（留出圆角的宽度）
+            near = rects.get(i + 1 if i < self.pos else i - 1) if abs(i - self.pos) >= 1 else None
+            p.save()
+            if near is not None:
+                r = near[0]
+                if i < self.pos:
+                    p.setClipRect(QRectF(r.right() - 24, 0, self.width(), self.height()))
+                else:
+                    p.setClipRect(QRectF(0, 0, r.x() + 24, self.height()))
+            k = s / base
+            m = self.SHADOW * k
+            p.drawPixmap(rect.adjusted(-m, -m, m, m), self._shadow(base), QRectF())
+            p.drawPixmap(rect, self._card(f, base), QRectF())
+            if dim:
+                p.setOpacity(dim); p.drawPixmap(rect, self._mask(base), QRectF())
+            p.restore()
             # 中间那张的上方：小头像 + 名字（像 iPhone 后台的 App 图标和名字），滑走时淡出
             fade = 1 - min(1.0, abs(i - self.pos))
             if fade > 0:
                 p.save(); p.setOpacity(fade)
-                av = images().get('avatar', f.item_id, f.name)
                 icon = QRectF(rect.x() + 4, rect.y() - 40, 30, 30)
-                if av is not None:
-                    p.save(); clip = QPainterPath(); clip.addEllipse(icon); p.setClipPath(clip)
-                    draw_cover(p, av, icon); p.restore()
+                clip = QPainterPath(); clip.addEllipse(icon)
+                p.save(); p.setClipPath(clip); draw_cover(p, 'avatar', f, icon); p.restore()
                 nf = QFont(FONT); nf.setPixelSize(15); nf.setBold(True); p.setFont(nf)
                 p.setPen(ink(0.85))
                 avail = int(rect.width() - 50)
                 p.drawText(QRectF(icon.right() + 8, icon.y(), avail, 30), Qt.AlignVCenter | Qt.AlignLeft,
                            QFontMetrics(nf).elidedText(f.name, Qt.ElideRight, avail))
                 p.restore()
-            # 卡片阴影
-            for k in range(6):
-                sh = QPainterPath(); sh.addRoundedRect(rect.adjusted(-k, -k + 4, k, k + 6), 22 + k, 22 + k)
-                p.fillPath(sh, QColor(0, 0, 0, 10))
-            # 卡片本体
-            path = QPainterPath(); path.addRoundedRect(rect, 22 * s, 22 * s)
-            g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-            g.setColorAt(0, QColor('#2b2f4a')); g.setColorAt(1, QColor('#5a4632'))
-            p.fillPath(path, g)
-            p.save(); p.setClipPath(path)
-            pm = self._poster(f, cw, ch)
-            if pm is not None:
-                p.drawPixmap(rect, pm, QRectF(0, 0, pm.width(), pm.height()))
-            # 底部渐变压暗，放文字
-            bottom = QRectF(rect.x(), rect.bottom() - rect.height() * 0.34, rect.width(), rect.height() * 0.34)
-            bg = QLinearGradient(bottom.topLeft(), bottom.bottomLeft())
-            bg.setColorAt(0, QColor(0, 0, 0, 0)); bg.setColorAt(1, QColor(0, 0, 0, 200))
-            p.fillRect(bottom, bg)
-            pad = 18 * s
-            big = QFont(FONT); big.setPixelSize(int(26 * s)); big.setBold(True)
-            p.setFont(big); p.setPen(QColor(255, 255, 255))
-            p.drawText(QRectF(rect.x() + pad, rect.bottom() - 84 * s, rect.width() - 2 * pad, 36 * s),
-                       Qt.AlignLeft | Qt.AlignVCenter, QFontMetrics(big).elidedText(f.name, Qt.ElideRight, int(rect.width() - 2 * pad)))
-            small = QFont(FONT); small.setPixelSize(int(13 * s)); p.setFont(small); p.setPen(QColor(255, 255, 255, 190))
-            line = SHORT.get(f.gacha_type, '') + (f' · {f.time[:10]}' if f.time else '')    # 没有时间就只写卡池
-            p.drawText(QRectF(rect.x() + pad, rect.bottom() - 46 * s, rect.width() - 2 * pad, 24 * s),
-                       Qt.AlignLeft | Qt.AlignVCenter, line)
-            # 右下角：抽数 + “抽”，和卡池那行底边对齐；歪没歪只看右上角的章
-            base = rect.bottom() - 28 * s
-            unit = QFont(FONT); unit.setPixelSize(int(12 * s))
-            num = QFont(FONT); num.setPixelSize(int(30 * s)); num.setBold(True)
-            ux = rect.right() - pad - QFontMetrics(unit).horizontalAdvance('抽')
-            p.setFont(unit); p.setPen(QColor(255, 255, 255, 190))
-            p.drawText(QPointF(ux, base), '抽')
-            c = QColor(luck_color(f.pulls, hard) if f.pulls else QColor(255, 255, 255)).lighter(125)
-            p.setFont(num); p.setPen(c)
-            p.drawText(QPointF(ux - 3 * s - QFontMetrics(num).horizontalAdvance(pulls_text(f)), base), pulls_text(f))
-            if dim:
-                p.fillPath(path, QColor(0, 0, 0, int(255 * dim)))
-            p.restore()
-            if f.result == '歪':
-                draw_stamp(p, QPointF(rect.right() - 40 * s, rect.y() + 42 * s), 30 * s)
 
     # ---------- 交互 ----------
     def wheelEvent(self, e):

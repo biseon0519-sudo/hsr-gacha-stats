@@ -6,7 +6,7 @@
 #   光锥：StarRailRes 的 light_cone_portrait 本来就是带背景的卡面，去掉银边后裁头像和海报。
 #   下载不到完整立绘时退回抠图版。
 # 用户放在 图片/自定义/ 里的同名图片优先（“真珠.jpg” 换海报，“真珠_头像.png” 换头像）
-import os, json, time, threading, urllib.parse, urllib.request
+import os, json, time, functools, threading, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Qt, QRect
@@ -36,13 +36,15 @@ README = """把图片放在这个文件夹里，就能替换工具里的角色�
 """
 
 
-_direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+@functools.cache
+def _direct():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _bwiki_lock = threading.Lock()
 
 
 def _read(url, direct=False):
     req = urllib.request.Request(url, headers={'User-Agent': UA})
-    with (_direct.open(req, timeout=60) if direct else urllib.request.urlopen(req, timeout=60)) as r:
+    with (_direct().open(req, timeout=60) if direct else urllib.request.urlopen(req, timeout=60)) as r:
         return r.read()
 
 
@@ -365,10 +367,15 @@ class ImageStore(QObject):
                 os.remove(os.path.join(AUTO['poster'], f'{i}.png'))
             except OSError:
                 pass
-        self._cache = {}
+        self._images = {}      # 文件路径 → QImage（后台线程预先解码，或用到时现读）
+        self._scaled = {}      # (图, 宽, 高, 顶对齐) → 按“铺满居中裁切”缩好的 QPixmap，重画时直接贴
+        self._paths = {}       # (kind, item_id, 名字) → 文件路径或 None；不用每次重画都去查文件
+        self._asked = set()    # 已经排过下载的 (kind, item_id)
+        self._changed = set()  # 刚下载覆盖了的文件
         self._pending, self._failed = set(), set()
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(4)
+        self.updated.connect(self.forget)
 
     def _upgrade(self):
         mark = os.path.join(AUTO['avatar'], '.style')
@@ -385,25 +392,65 @@ class ImageStore(QObject):
         with open(mark, 'w', encoding='utf-8') as f:
             f.write(STYLE)
 
+    def preload(self):
+        """在后台线程把已有的头像、海报先解码好（QImage 可以在别的线程读），第一次显示时不用在界面线程里等。"""
+        def run():
+            for d in (CUSTOM, AUTO['avatar'], AUTO['poster']):
+                for n in sorted(os.listdir(d)):
+                    p = os.path.join(d, n)
+                    if n.lower().endswith(EXTS) and p not in self._images:
+                        img = QImage(p)
+                        if not img.isNull():
+                            self._images.setdefault(p, img)
+        threading.Thread(target=run, daemon=True).start()
+
+    def forget(self):
+        """图片文件可能变了（刚下载完、用户往「自定义」里放了图）：忘掉记住的路径和缩好的图，下次重新找。"""
+        self._paths.clear(); self._scaled.clear(); self._asked.clear()
+        with self._lock:
+            changed, self._changed = self._changed, set()
+        for p in changed:
+            self._images.pop(p, None)
+
     def path(self, kind, item_id, name):
-        suffix = '_头像' if kind == 'avatar' else ''
-        for ext in EXTS:
-            p = os.path.join(CUSTOM, name + suffix + ext)
-            if os.path.exists(p):
-                return p
-        p = os.path.join(AUTO[kind], f'{item_id}.png')
-        return p if os.path.exists(p) else None
+        key = (kind, item_id, name)
+        if key not in self._paths:
+            suffix = '_头像' if kind == 'avatar' else ''
+            found = [os.path.join(CUSTOM, name + suffix + ext) for ext in EXTS]
+            found = [p for p in found if os.path.exists(p)] + [os.path.join(AUTO[kind], f'{item_id}.png')]
+            self._paths[key] = next((p for p in found if os.path.exists(p)), None)
+        return self._paths[key]
 
     def get(self, kind, item_id, name):
-        """返回 QPixmap；还没有就排队下载、先返回 None。"""
+        """返回原图 QImage；还没有就排队下载、先返回 None。"""
         p = self.path(kind, item_id, name)
         if p is None:
-            self.request([(kind, item_id, name)])
+            if (kind, item_id) not in self._asked:
+                self._asked.add((kind, item_id))
+                self.request([(kind, item_id, name)])
             return None
-        key = (p, os.path.getmtime(p))
-        pm = self._cache.get(key)
+        img = self._images.get(p)
+        if img is None:
+            img = self._images[p] = QImage(p)
+        return img if not img.isNull() else None
+
+    def cover(self, kind, item_id, name, w, h, ratio, align_top=False):
+        """缩放到 w×h（逻辑像素）的图，按“铺满并居中裁切”（align_top 时顶部对齐）；按尺寸缓存。"""
+        src = self.get(kind, item_id, name)
+        if src is None:
+            return None
+        W, H = max(1, round(w * ratio)), max(1, round(h * ratio))
+        key = (src.cacheKey(), W, H, align_top)
+        pm = self._scaled.get(key)
         if pm is None:
-            pm = self._cache[key] = QPixmap(p)
+            s = max(W / src.width(), H / src.height())
+            cw, ch = W / s, H / s
+            x, y = (src.width() - cw) / 2, 0 if align_top else (src.height() - ch) / 2
+            img = src.copy(QRect(int(x), int(y), max(1, int(cw)), max(1, int(ch)))).scaled(W, H, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            pm = QPixmap.fromImage(img); pm.setDevicePixelRatio(ratio)
+            if len(self._scaled) > 600:
+                self._scaled.clear()
+            self._scaled[key] = pm
         return pm
 
     def request(self, items):
@@ -431,6 +478,8 @@ class ImageStore(QObject):
             if max(img.width(), img.height()) > limit:
                 img = img.scaled(limit, limit, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             img.save(os.path.join(AUTO[kind], f'{item_id}.png'))
+            with self._lock:
+                self._changed.add(os.path.join(AUTO[kind], f'{item_id}.png'))
         if imgs:
             self.updated.emit()
 

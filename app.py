@@ -1,8 +1,14 @@
 # 崩铁抽卡统计：读游戏缓存里的跃迁链接 → 拉取记录存到本地 → 统计保底、歪没歪；头像墙和海报模式展示五星
 import os, sys, threading, traceback
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget, QStackedWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QFontDatabase
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QVBoxLayout, QWidget, QStackedWidget, QTableWidgetItem, QHeaderView,
+                               QAbstractItemView)
+if __name__ == '__main__' and QApplication.instance() is None:
+    # 启动提速：第一次量文字时 Qt 要把系统字体全扫一遍（几百个字体约 0.5 秒）。先建好 QApplication，
+    # 让后台线程去扫，和下面导入界面库（约 0.4 秒）同时进行。（在后台连字体文件也加载的话会和界面线程抢锁，反而更慢）
+    _app = QApplication(sys.argv)
+    threading.Thread(target=QFontDatabase.families, daemon=True).start()
 from qfluentwidgets import (SimpleCardWidget, CaptionLabel, BodyLabel, StrongBodyLabel, TitleLabel, SubtitleLabel,
                             PrimaryPushButton, PushButton, ComboBox, SegmentedWidget, TableWidget, ProgressBar,
                             IndeterminateProgressBar, SmoothScrollArea, InfoBar, InfoBarPosition, MessageBoxBase,
@@ -17,7 +23,7 @@ from fluent_ui import make_app, Window, show_window, single_instance
 
 ALWAYS_SHOWN = ('11', '12', '1')          # 联动池、新手池有记录才显示
 GOLD, PURPLE = QColor('#d9952a'), QColor('#8e5fd6')
-VERSION = '2026.10.20'                    # 日历版本号：发布当天的日期，同一天再发就加 .1、.2
+VERSION = '2026.10.20.1'                  # 日历版本号：发布当天的日期，同一天再发就加 .1、.2
 JADE_PER_PULL = 160
 SIDE_MARGIN = 16                          # 窗口左右留白；海报模式的卡片不受这个限制，铺到窗口边
 
@@ -127,13 +133,18 @@ class PoolPage(QWidget):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setBorderVisible(True); self.table.setBorderRadius(8); self.table.setWordWrap(False)
+        # 列宽按表头和最长内容一次算好定死；按内容自动调宽要逐行量，上千行时很慢
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents); hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeToContents); hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        fm = self.table.fontMetrics()
+        for col, sample in ((0, '2026-10-19 22:11:25'), (2, '类型类型'), (3, '第几抽抽')):    # 单元格字号和内边距比默认字体大，多留一点
+            hh.setSectionResizeMode(col, QHeaderView.Fixed)
+            self.table.setColumnWidth(col, fm.horizontalAdvance(sample) + 48)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
         rv.addWidget(self.table, 1)
         body.addWidget(left, 5); body.addWidget(right, 4)
         v.addLayout(body, 1)
-        qconfig.themeChanged.connect(lambda: self.fill_table(self.filter.currentRouteKey() or 'all'))
+        self._stale = True                # 表格等这一页真正显示时才填，启动时不用把几千行都建出来
+        qconfig.themeChanged.connect(self._refill)
 
     def set_data(self, s, records):
         self.records = [r for r in records if r['gacha_type'] == self.gt]
@@ -147,7 +158,20 @@ class PoolPage(QWidget):
         self.wall.set_data(s.fives, s.hard_pity, s.pity)
         self.wall_note.setText('鼠标移上去看详情')
         self.table_note.setText(f'数据起始于 {s.first_time[:10]}' if s.first_time else '还没有记录')
-        self.fill_table(self.filter.currentRouteKey() or 'all')
+        self._stale = True
+        self._refill()
+
+    def _refill(self):
+        if self.isVisible():
+            self._stale = False
+            self.fill_table(self.filter.currentRouteKey() or 'all')
+        else:
+            self._stale = True
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._stale:
+            self._refill()
 
     def fill_table(self, rank):
         rows, n = [], 0
@@ -449,6 +473,7 @@ class App(Window):
             page.set_data(st[gt], doc['records'])
             self.tabs.items[gt].setVisible(gt in ALWAYS_SHOWN or st[gt].total > 0)
         self.posters.set_data(st)
+        images().forget()           # 「自定义」里可能放了新图
         # 提前把要用的图都排进下载队列
         items = {(f.item_id, f.name) for s in st.values() for f in s.fives}
         images().request([(k, i, n) for i, n in items for k in ('avatar', 'poster')])
@@ -544,6 +569,7 @@ def main():
     win = None
     if not single_instance('hsr-gacha-stats', lambda: win):
         return
+    images().preload()          # 搭窗口的同时在后台把图片解码好
     win = App()
     show_window(win)
     sys.exit(app.exec())
