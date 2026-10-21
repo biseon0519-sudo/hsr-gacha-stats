@@ -6,12 +6,13 @@
 #   2. 同一个卡池（gacha_id）里出过不同的五星：出得最多的是 UP，其余是歪
 #   3. 卡池里只出过一种五星：在歪池名单（standard.json：常驻 + 星缘相邀 + 光锥）里就算歪
 import os, json
+import store
 from collections import Counter
 from dataclasses import dataclass, field
 from gacha_api import POOLS
 
 LIMITED = {'11', '12', '21', '22'}
-STANDARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'standard.json')
+STANDARD_FILE = os.path.join(store.RES, 'standard.json')
 STANDARD_CHARS = ['姬子', '瓦尔特', '布洛妮娅', '杰帕德', '克拉拉', '彦卿', '白露']
 
 

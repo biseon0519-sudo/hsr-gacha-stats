@@ -1,7 +1,9 @@
 # 本地记录：每个 UID 一个 json 文件，放在 data/ 下。合并时按记录 id 去重。
-import os, json, time
+import os, sys, json, time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# 打包成 exe 时：记录、设置、图片放在 exe 旁边；自带的 standard.json、图标在解包目录（RES）里
+HERE = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+RES = getattr(sys, '_MEIPASS', HERE)
 DATA_DIR = os.path.join(HERE, 'data')
 SETTINGS = os.path.join(HERE, 'settings.json')
 

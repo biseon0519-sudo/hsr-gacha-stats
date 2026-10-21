@@ -8,6 +8,9 @@ settings.json
 # 个人数据：抽卡记录和导入用的截图，不进版本库
 data/
 IMG_*.JPG
+# 打包输出
+build/
+dist/
 # 本地专用：给 Claude 的项目笔记（含个人信息）、本机快捷方式
 CLAUDE.md
 *.lnk

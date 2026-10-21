@@ -23,7 +23,7 @@ from fluent_ui import make_app, Window, show_window, single_instance
 
 ALWAYS_SHOWN = ('11', '12', '1')          # 联动池、新手池有记录才显示
 GOLD, PURPLE = QColor('#d9952a'), QColor('#8e5fd6')
-VERSION = '2026.10.20.1'                  # 日历版本号：发布当天的日期，同一天再发就加 .1、.2
+VERSION = '2026.10.21'                    # 日历版本号：发布当天的日期，同一天再发就加 .1、.2
 JADE_PER_PULL = 160
 SIDE_MARGIN = 16                          # 窗口左右留白；海报模式的卡片不受这个限制，铺到窗口边
 
@@ -392,7 +392,7 @@ class App(Window):
 
     def __init__(self):
         super().__init__(f'崩铁抽卡统计  {VERSION}')
-        self.setWindowIcon(QIcon(os.path.join(store.HERE, 'icon.ico')))
+        self.setWindowIcon(QIcon(os.path.join(store.RES, 'icon.ico')))
         self.settings = store.load_settings()
         self.resize(*self.settings.get('size', (1180, 800)))
         self.setMinimumSize(980, 660)
@@ -564,7 +564,26 @@ class App(Window):
         super().closeEvent(e)
 
 
+class ErrorLog:
+    """exe 没有控制台：报错写到旁边的 log.txt。真有内容要写时才建文件，正常运行不留空的 log.txt"""
+    file = None
+
+    def write(self, s):
+        if self.file is None:
+            self.file = open(os.path.join(store.HERE, 'log.txt'), 'w', encoding='utf-8', buffering=1)
+        return self.file.write(s)
+
+    def flush(self):
+        if self.file:
+            self.file.flush()
+
+    def isatty(self):
+        return False
+
+
 def main():
+    if getattr(sys, 'frozen', False) and sys.stderr is None:
+        sys.stdout = sys.stderr = ErrorLog()
     app = make_app()
     win = None
     if not single_instance('hsr-gacha-stats', lambda: win):

@@ -12,7 +12,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal, Qt, QRect
 from PySide6.QtGui import QPixmap, QImage, QPainter, QTransform, QColor
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from store import HERE
 ROOT = os.path.join(HERE, '图片')
 AUTO = {'avatar': os.path.join(ROOT, '头像'), 'poster': os.path.join(ROOT, '海报')}
 CUSTOM = os.path.join(ROOT, '自定义')
