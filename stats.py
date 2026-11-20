@@ -5,7 +5,7 @@
 #   1. 用户手动标过的（doc['overrides']）为准
 #   2. 同一个卡池（gacha_id）里出过不同的五星：出得最多的是 UP，其余是歪
 #   3. 卡池里只出过一种五星：在歪池名单（standard.json：常驻 + 星缘相邀 + 光锥）里就算歪
-import os, json
+import os, json, functools
 import store
 from collections import Counter
 from dataclasses import dataclass, field
@@ -16,17 +16,14 @@ STANDARD_FILE = os.path.join(store.RES, 'standard.json')
 STANDARD_CHARS = ['姬子', '瓦尔特', '布洛妮娅', '杰帕德', '克拉拉', '彦卿', '白露']
 
 
+@functools.cache
 def load_pool_names():
+    """standard.json 是随程序带的，运行中不会变，读一次就行。"""
     try:
         with open(STANDARD_FILE, encoding='utf-8') as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
-
-
-def save_pool_names(d):
-    with open(STANDARD_FILE, 'w', encoding='utf-8') as f:
-        json.dump(d, f, ensure_ascii=False, indent=1)
 
 
 def chosen_names(doc):

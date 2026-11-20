@@ -5,9 +5,10 @@ from collections import Counter
 from PySide6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import QPainter, QColor, QFont, QFontMetrics, QPainterPath
 from PySide6.QtWidgets import QWidget, QToolTip
-from qfluentwidgets import isDarkTheme, themeColor, qconfig
-from gacha_api import POOLS
-from posters import FONT, SHORT, ink
+from qfluentwidgets import themeColor, qconfig
+from gacha_api import POOLS, SHORT
+from fluent_ui import FONT
+from posters import ink
 
 
 def pool_color(gt):

@@ -2,13 +2,14 @@
 import math
 from PySide6.QtCore import Qt, QRectF, QPointF, QVariantAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QPainter, QColor, QFont, QFontMetrics, QPainterPath, QLinearGradient, QPen, QPixmap
-from PySide6.QtWidgets import QWidget, QToolTip
-from qfluentwidgets import isDarkTheme, qconfig
-from images import images
-from gacha_api import POOLS
+from PySide6.QtWidgets import QWidget, QToolTip, QHBoxLayout, QVBoxLayout
+from qfluentwidgets import isDarkTheme, qconfig, CheckBox
+from images import images, POSTER_RATIO
+from gacha_api import POOLS, SHORT
+from stats import LIMITED
+from fluent_ui import FONT
+from widgets import SIDE_MARGIN, muted
 
-FONT = 'Microsoft YaHei UI'
-SHORT = {'11': '角色', '12': '光锥', '1': '常驻', '21': '角色联动', '22': '光锥联动', '2': '新手'}
 STAMP = QColor('#d63c32')
 
 
@@ -36,6 +37,10 @@ def pulls_text(f):
     return ('≥' if f.uncertain else '') + str(f.pulls)
 
 
+def hard_of(f):
+    return POOLS[f.gacha_type][1] if f.gacha_type in POOLS else 90
+
+
 def describe(f, hard):
     when = f.time[:16] if f.time else '无时间数据'
     lines = [f'{f.name}　{SHORT.get(f.gacha_type, "")}', when]
@@ -45,16 +50,35 @@ def describe(f, hard):
     lines.append({'歪': '小保底歪了，下一个五星必是限定', '大保底': '上一个歪了，这个是大保底',
                   '不歪': '小保底不歪', '限定': '不知道当时是小保底还是大保底'}.get(f.result, '')
                  + ('（你手动标的）' if f.manual else ''))
-    if f.gacha_type in ('11', '12', '21', '22'):
+    if f.gacha_type in LIMITED:
         lines.append('判断不对的话，右键可以手动改')
     return '\n'.join(l for l in lines if l)
 
 
-def draw_cover(p, kind, f, rect, align_top=False):
-    """把 f 的头像/海报按“铺满并居中裁切”的方式画进 rect。缩好的图按尺寸缓存，重画时直接贴。"""
-    pm = images().cover(kind, f.item_id, f.name, rect.width(), rect.height(), p.device().devicePixelRatioF(), align_top)
+def draw_cover(p, kind, item, rect, align_top=False):
+    """把 item（有 item_id 和 name 的五星）的头像/海报按“铺满并居中裁切”的方式画进 rect。
+    海报还没下好时用头像顶上；缩好的图按尺寸缓存，重画时直接贴。"""
+    pm = images().cover(kind, item.item_id, item.name, rect.width(), rect.height(), p.device().devicePixelRatioF(),
+                        align_top)
     if pm is not None:
         p.drawPixmap(rect, pm, QRectF())
+
+
+def poster_bg(p, rect, radius):
+    """海报卡片的深色底（图还没下好时看到的就是它），返回圆角路径供裁切。"""
+    path = QPainterPath(); path.addRoundedRect(rect, radius, radius)
+    g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+    g.setColorAt(0, QColor('#2b2f4a')); g.setColorAt(1, QColor('#5a4632'))
+    p.fillPath(path, g)
+    return path
+
+
+def shade_bottom(p, rect, frac):
+    """海报底部 frac 高度渐变压暗，上面放白字。"""
+    bottom = QRectF(rect.x(), rect.bottom() - rect.height() * frac, rect.width(), rect.height() * frac)
+    g = QLinearGradient(bottom.topLeft(), bottom.bottomLeft())
+    g.setColorAt(0, QColor(0, 0, 0, 0)); g.setColorAt(1, QColor(0, 0, 0, 200))
+    p.fillRect(bottom, g)
 
 
 def draw_stamp(p, center, r):
@@ -97,7 +121,8 @@ def draw_tile(p, rect, img_h, f, text, color, font, radius=10):
     p.drawText(label, Qt.AlignCenter, text)
 
 
-class _Themed(QWidget):
+class Canvas(QWidget):
+    """自己画的控件：跟着深浅色和新下载的图重画。"""
     markRequested = Signal(object, object)    # 右键某个五星：(Five, 鼠标的屏幕坐标)，由主窗口弹菜单
 
     def __init__(self, parent=None):
@@ -107,7 +132,7 @@ class _Themed(QWidget):
         images().updated.connect(self.update)
 
 
-class AvatarWall(_Themed):
+class AvatarWall(Canvas):
     """小黑盒那样的头像墙：最新的在最前，第一格是“?”+ 距上个五星已抽多少。"""
     W, IMG, LABEL, GAP, PAD = 88, 88, 30, 12, 14
 
@@ -181,7 +206,7 @@ class AvatarWall(_Themed):
             self.markRequested.emit(self.fives[i], e.globalPos())
 
 
-class FiveTile(_Themed):
+class FiveTile(Canvas):
     """单独一格头像（总览里的新手跃迁卡片用）：头像 + 下方第几抽出的，数字用正文颜色。
     还没出五星时和头像墙第一格一样：黄底问号 + 已抽多少。"""
     IMG, LABEL = 58, 22
@@ -207,11 +232,10 @@ class FiveTile(_Themed):
         QToolTip.showText(e.globalPosition().toPoint(), tip, self)
 
 
-class PosterFlow(_Themed):
+class PosterFlow(Canvas):
     """海报模式：正在看的卡片在正中间完整显示，和两边隔开一段；两边像 iPhone 后台那样一张压一张往外排，一直延伸到画面外。
     旧的在右边、新的在左边，打开时停在最新的一张。滚轮、拖动、方向键切换。"""
     focusChanged = Signal(int, int)       # 当前第几个、一共几个
-    RATIO = 0.58                          # 卡片宽高比（images.POSTER_RATIO 按这个裁海报）
     GAP, SIDE = 28, 0.92                  # 中间卡片和两边的间距；两边卡片的缩放
     STEP = 0.30                           # 两边每往外一张，下面那张露出自己宽度的 30%
 
@@ -253,8 +277,8 @@ class PosterFlow(_Themed):
     def _size(self):
         """中间卡片的宽高：按窗口高度定，窗口太窄时也别超过宽度的 45%。"""
         h = min(self.height() - 66, 720)
-        w = min(h * self.RATIO, self.width() * 0.45)
-        return w, w / self.RATIO
+        w = min(h * POSTER_RATIO, self.width() * 0.45)
+        return w, w / POSTER_RATIO
 
     def _place(self, d):
         """第 d 张（相对当前焦点）卡片的中心 x、缩放、遮暗程度。d < 0（更旧）在右边，d > 0 在左边。"""
@@ -310,18 +334,9 @@ class PosterFlow(_Themed):
     def _render_card(self, f, w, h, s):
         pm, p = self._canvas(w, h)
         rect = QRectF(0, 0, w, h)
-        path = QPainterPath(); path.addRoundedRect(rect, 22 * s, 22 * s)
-        g = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        g.setColorAt(0, QColor('#2b2f4a')); g.setColorAt(1, QColor('#5a4632'))
-        p.fillPath(path, g)
-        p.setClipPath(path)
-        kind = 'poster' if images().get('poster', f.item_id, f.name) is not None else 'avatar'
-        draw_cover(p, kind, f, rect, align_top=True)
-        # 底部渐变压暗，放文字
-        bottom = QRectF(0, h - h * 0.34, w, h * 0.34)
-        bg = QLinearGradient(bottom.topLeft(), bottom.bottomLeft())
-        bg.setColorAt(0, QColor(0, 0, 0, 0)); bg.setColorAt(1, QColor(0, 0, 0, 200))
-        p.fillRect(bottom, bg)
+        p.setClipPath(poster_bg(p, rect, 22 * s))
+        draw_cover(p, 'poster', f, rect, align_top=True)
+        shade_bottom(p, rect, 0.34)
         pad = 18 * s
         big = QFont(FONT); big.setPixelSize(int(26 * s)); big.setBold(True)
         p.setFont(big); p.setPen(QColor(255, 255, 255))
@@ -337,8 +352,7 @@ class PosterFlow(_Themed):
         ux = w - pad - QFontMetrics(unit).horizontalAdvance('抽')
         p.setFont(unit); p.setPen(QColor(255, 255, 255, 190))
         p.drawText(QPointF(ux, base), '抽')
-        hard = POOLS.get(f.gacha_type, ('', 90))[1]
-        c = QColor(luck_color(f.pulls, hard) if f.pulls else QColor(255, 255, 255)).lighter(125)
+        c = QColor(luck_color(f.pulls, hard_of(f)) if f.pulls else QColor(255, 255, 255)).lighter(125)
         p.setFont(num); p.setPen(c)
         p.drawText(QPointF(ux - 3 * s - QFontMetrics(num).horizontalAdvance(pulls_text(f)), base), pulls_text(f))
         if f.result == '歪':
@@ -459,7 +473,7 @@ class PosterFlow(_Themed):
             QToolTip.hideText()
         else:
             f = self.fives[hit]
-            QToolTip.showText(e.globalPosition().toPoint(), describe(f, POOLS.get(f.gacha_type, ('', 90))[1]), self)
+            QToolTip.showText(e.globalPosition().toPoint(), describe(f, hard_of(f)), self)
 
     def mouseReleaseEvent(self, e):
         if self._drag is None:
@@ -484,3 +498,41 @@ class PosterFlow(_Themed):
             if rect.contains(pos):
                 return i
         return None
+
+
+class PosterPage(QWidget):
+    """海报模式：每个五星一张大卡片，左右滑动。上面勾选要看哪些卡池，可以任意组合。卡片一直铺到窗口左右边缘。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
+        top = QHBoxLayout(); top.setContentsMargins(SIDE_MARGIN, 0, SIDE_MARGIN, 0); top.setSpacing(18)
+        self.checks = {}
+        for gt in POOLS:
+            c = CheckBox(SHORT[gt]); c.setChecked(True)
+            c.stateChanged.connect(lambda *_: self.apply())
+            top.addWidget(c)
+            self.checks[gt] = c
+        self.counter = muted()
+        top.addStretch(1); top.addWidget(self.counter)
+        v.addLayout(top)
+        self.flow = PosterFlow()
+        self.flow.focusChanged.connect(lambda i, n: self.counter.setText(f'第 {i} / {n} 个五星　·　滚轮、拖动或 ← → 切换，点卡片跳过去'))
+        v.addWidget(self.flow, 1)
+        self.st = {}
+
+    def set_data(self, st):
+        self.st = st
+        for gt, c in self.checks.items():
+            c.setVisible(st[gt].total > 0)
+        self.apply()
+
+    def apply(self):
+        """新手跃迁的五星一定是最早的，放最前；然后是没有时间的（截图导入的），其余按时间排。"""
+        chosen = [gt for gt, c in self.checks.items() if c.isChecked() and gt in self.st]
+        newbie = self.st['2'].fives if '2' in chosen else []
+        rest = [f for gt in chosen if gt != '2' for f in self.st[gt].fives]
+        fives = newbie + [f for f in rest if not f.time] + sorted((f for f in rest if f.time), key=lambda f: f.time)
+        self.flow.set_data(fives)
+        if not fives:
+            self.counter.setText('没有勾选卡池' if not chosen else '')

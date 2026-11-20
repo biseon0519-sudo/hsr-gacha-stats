@@ -5,6 +5,8 @@
 #         没有的话从上面那张立绘以头为中心裁，透明处垫底色。
 #   光锥：StarRailRes 的 light_cone_portrait 本来就是带背景的卡面，去掉银边后裁头像和海报。
 #   下载不到完整立绘时退回抠图版。
+#   新角色/光锥刚上线时 StarRailRes 常常还没收录：角色的抠图头像改用 BWIKI「<名字>头像」（圆形、带背景，同一张画裁的，照样能定位），
+#         光锥改用 enka 的光锥原画（LightConeMaxFigures）。
 # 用户放在 图片/自定义/ 里的同名图片优先（“真珠.jpg” 换海报，“真珠_头像.png” 换头像）
 import os, json, time, functools, threading, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -21,9 +23,10 @@ STYLE = 'full-art-5'        # 自动下载的图的版本；和 图片/头像/.s
 MIRRORS = ('https://raw.githubusercontent.com/Mar-7th/StarRailRes/master/',
            'https://cdn.jsdelivr.net/gh/Mar-7th/StarRailRes@master/')
 DRAWCARD = 'https://enka.network/ui/hsr/SpriteOutput/AvatarDrawCard/{}.png'
+LC_ART = 'https://enka.network/ui/hsr/SpriteOutput/LightConeMaxFigures/{}.png'
 BWIKI = 'https://wiki.biligame.com/sr/api.php?action=query&prop=imageinfo&iiprop=url&format=json&titles='
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-POSTER_RATIO = 0.58         # 海报卡片的宽高比，和 posters.PosterFlow.RATIO 一致
+POSTER_RATIO = 0.58         # 海报卡片的宽高比：海报模式的卡片和裁海报都按这个
 MATCH_OK = 0.8              # 裁出来的头像和抠图版的相似度低于这个数，算没找到
 README = """把图片放在这个文件夹里，就能替换工具里的角色图（重开工具或点一下“更新记录”后生效）：
 
@@ -39,10 +42,11 @@ README = """把图片放在这个文件夹里，就能替换工具里的角色�
 @functools.cache
 def _direct():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_bwiki_lock = threading.Lock()
+_bwiki_lock = threading.Lock()      # 同一时间只发一个 BWIKI 请求（查询要几秒，界面线程别碰这把锁）
+_wanted_lock = threading.Lock()     # 只护着下面的 _wanted，拿一下就放
 
 
-def _read(url, direct=False):
+def read_url(url, direct=False):
     req = urllib.request.Request(url, headers={'User-Agent': UA})
     with (_direct().open(req, timeout=60) if direct else urllib.request.urlopen(req, timeout=60)) as r:
         return r.read()
@@ -53,7 +57,7 @@ def _fetch(src, direct=False):
     direct：不走代理（BWIKI 会拦代理过来的请求）。"""
     for url in ([src] if src.startswith('http') else [m + src for m in MIRRORS]):
         try:
-            img = QImage.fromData(_read(url, direct))
+            img = QImage.fromData(read_url(url, direct))
             if not img.isNull():
                 return img
         except Exception:
@@ -70,18 +74,41 @@ def _reveal_url(name):
     BWIKI 请求多了会被拦，所以一次把等着的角色都查掉（一次最多 50 个文件名，png/jpg 各试一个），查过的记住。"""
     with _bwiki_lock:
         if name not in _reveal_urls:
-            names = [name] + [n for n in sorted(_wanted) if n != name and n not in _reveal_urls][:24]
+            with _wanted_lock:
+                names = [name] + [n for n in sorted(_wanted) if n != name and n not in _reveal_urls][:24]
             titles = '|'.join(f'文件:{n}立绘2.{ext}' for n in names for ext in ('png', 'jpg'))
-            data = json.loads(_read(BWIKI + urllib.parse.quote(titles), direct=True))
+            data = json.loads(read_url(BWIKI + urllib.parse.quote(titles), direct=True))
             found = {}
             for page in data['query']['pages'].values():
                 if page.get('imageinfo'):
                     found[page['title'].split(':', 1)[1].rsplit('立绘2.', 1)[0]] = page['imageinfo'][0]['url']
-            for n in names:
-                _reveal_urls[n] = found.get(n)
-                _wanted.discard(n)
+            with _wanted_lock:
+                for n in names:
+                    _reveal_urls[n] = found.get(n)
+                    _wanted.discard(n)
             time.sleep(1)
         return _reveal_urls[name]
+
+
+def _bwiki_url(title):
+    """BWIKI 上一个文件的地址，没有返回 None；查询失败抛异常。"""
+    with _bwiki_lock:
+        data = json.loads(read_url(BWIKI + urllib.parse.quote('文件:' + title), direct=True))
+        time.sleep(1)
+    page = next(iter(data['query']['pages'].values()))
+    return page['imageinfo'][0]['url'] if page.get('imageinfo') else None
+
+
+def _icon(item_id, name):
+    """用来在立绘里定位的头像：StarRailRes 的抠图版；还没收录的新角色用 BWIKI 的圆头像。都没有返回 None。"""
+    icon = _fetch(f'icon/character/{item_id}.png')
+    if icon is None:
+        try:
+            url = _bwiki_url(f'{name}头像.png')
+            icon = _fetch(url, direct=True) if url else None
+        except Exception:
+            icon = None
+    return icon.convertToFormat(QImage.Format_ARGB32) if icon is not None else None
 
 
 def _arr(img):
@@ -274,7 +301,23 @@ def _dilate(m, r):
     return out
 
 
-def remove_text(crop, x, poster_found, art, art_found):
+def framed_band(img):
+    """有的公开海报是带金框的卡片、框外透明（星神★阿哈）：返回框里面的 (上边, 高度)，避开金框线；普通海报返回 None。"""
+    small = img.scaled(512, 512, Qt.KeepAspectRatio, Qt.FastTransformation)
+    a = _arr(small)[:, int(small.width() * 0.3):int(small.width() * 0.7), 3]
+    rows = np.nonzero((a > 250).all(axis=1))[0]
+    if len(rows) == len(a) or len(rows) < len(a) * 0.4:
+        return None
+    seg = max(np.split(rows, np.nonzero(np.diff(rows) > 1)[0] + 1), key=len)
+    if len(seg) < len(a) * 0.4:
+        return None
+    sy = img.height() / small.height()
+    top, bottom = (seg[0] + 1) * sy, seg[-1] * sy
+    pad = (bottom - top) * 0.03
+    return int(top + pad), int(bottom - top - 2 * pad)
+
+
+def remove_text(crop, x, y, poster_found, art, art_found):
     """早期角色的公开海报在人物旁边印着台词。海报里的画和 enka 立绘是同一张，按两边找到的头像位置把立绘对齐叠到海报上，
     逐像素比较：海报上多出来的（文字）用立绘的像素补上。立绘透明的地方没法比，就保持原样。"""
     w, h = crop.width(), crop.height()
@@ -283,7 +326,7 @@ def remove_text(crop, x, poster_found, art, art_found):
     p = QPainter(warped)
     p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
     k = poster_found[2] / art_found[2]
-    p.translate(poster_found[0] - x, poster_found[1]); p.rotate(poster_found[3] - art_found[3])
+    p.translate(poster_found[0] - x, poster_found[1] - y); p.rotate(poster_found[3] - art_found[3])
     p.scale(k, k); p.translate(-art_found[0], -art_found[1])
     p.drawImage(0, 0, art)
     p.end()
@@ -309,17 +352,17 @@ def reveal_poster(item_id, name, icon, art=None, art_found=None):
     found = _find(f'{item_id}@poster', poster, icon)
     if found is None:
         return None
-    h = poster.height()
+    y, h = framed_band(poster) or (0, poster.height())
     w = int(h * POSTER_RATIO)
     x = int(min(max(0, found[0] - w / 2), poster.width() - w))
-    crop = poster.copy(x, 0, w, h)
-    return remove_text(crop, x, found, art, art_found) if art_found is not None else crop
+    crop = poster.copy(x, y, w, h)
+    return remove_text(crop, x, y, found, art, art_found) if art_found is not None else crop
 
 
 def make_images(item_id, name):
     """下载并裁好一个角色/光锥的 {'avatar': QImage, 'poster': QImage}；下载失败的那项缺省。"""
     if int(item_id) < 20000:
-        art, icon = _fetch(DRAWCARD.format(item_id)), _fetch(f'icon/character/{item_id}.png')
+        art, icon = _fetch(DRAWCARD.format(item_id)), _icon(item_id, name)
         if art is not None and icon is not None:
             found = _find(item_id, art, icon)
             if found is not None:
@@ -340,8 +383,13 @@ def make_images(item_id, name):
             out['poster'] = portrait.copy(portrait.rect().intersected(_opaque_rect(portrait)))
         return out
     card = _fetch(f'image/light_cone_portrait/{item_id}.png')
-    if card is None:
-        return {}
+    if card is None:                    # StarRailRes 还没收录的新光锥：用 enka 的光锥原画，去掉四周一圈白边
+        art = _fetch(LC_ART.format(item_id))
+        if art is None:
+            return {}
+        art = art.copy(art.rect().adjusted(*(int(art.width() * k) for k in (0.025, 0.025, -0.025, -0.025))))
+        side = art.width()
+        return {'avatar': art.copy(0, int((art.height() - side) * 0.3), side, side), 'poster': art}
     inner = card.rect().adjusted(*(int(card.width() * k) for k in (0.035, 0.03, -0.035, -0.03)))   # 去掉银边
     side = inner.width()
     return {'avatar': card.copy(inner.x(), inner.y() + int((inner.height() - side) * 0.3), side, side),
@@ -427,7 +475,7 @@ class ImageStore(QObject):
         if p is None:
             if (kind, item_id) not in self._asked:
                 self._asked.add((kind, item_id))
-                self.request([(kind, item_id, name)])
+                self.request([(item_id, name)])
             return None
         img = self._images.get(p)
         if img is None:
@@ -435,8 +483,11 @@ class ImageStore(QObject):
         return img if not img.isNull() else None
 
     def cover(self, kind, item_id, name, w, h, ratio, align_top=False):
-        """缩放到 w×h（逻辑像素）的图，按“铺满并居中裁切”（align_top 时顶部对齐）；按尺寸缓存。"""
+        """缩放到 w×h（逻辑像素）的图，按“铺满并居中裁切”（align_top 时顶部对齐）；按尺寸缓存。
+        海报还没下好时先用头像顶上。"""
         src = self.get(kind, item_id, name)
+        if src is None and kind == 'poster':
+            src = self.get('avatar', item_id, name)
         if src is None:
             return None
         W, H = max(1, round(w * ratio)), max(1, round(h * ratio))
@@ -454,12 +505,12 @@ class ImageStore(QObject):
         return pm
 
     def request(self, items):
-        """items: [(kind, item_id, 名字)]。同一个 item 的头像和海报一起下载。"""
-        names = {i: n for k, i, n in items if not os.path.exists(os.path.join(AUTO[k], f'{i}.png'))}
+        """items: [(item_id, 名字)]，头像或海报缺一样就排队下载（同一个 item 的头像和海报一起生成）。"""
+        names = {i: n for i, n in items if not all(os.path.exists(os.path.join(d, f'{i}.png')) for d in AUTO.values())}
         with self._lock:
             new = set(names) - self._pending - self._failed
             self._pending |= new
-        with _bwiki_lock:
+        with _wanted_lock:
             _wanted.update(names[i] for i in new if int(i) < 20000)
         for i in new:
             self._pool.submit(self._download, i, names[i])
@@ -477,18 +528,21 @@ class ImageStore(QObject):
             limit = 256 if kind == 'avatar' else 1200          # 原图 2048px，缩小再存，省空间也画得快
             if max(img.width(), img.height()) > limit:
                 img = img.scaled(limit, limit, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            img.save(os.path.join(AUTO[kind], f'{item_id}.png'))
+            path = os.path.join(AUTO[kind], f'{item_id}.png')
+            img.save(path + '.tmp', 'PNG')
+            os.replace(path + '.tmp', path)     # 写好再换上，界面线程不会读到写了一半的图
             with self._lock:
-                self._changed.add(os.path.join(AUTO[kind], f'{item_id}.png'))
+                self._changed.add(path)
         if imgs:
             self.updated.emit()
 
 
-store = None
+_instance = None
 
 
 def images():
-    global store
-    if store is None:
-        store = ImageStore()
-    return store
+    """全局唯一的图片库，第一次用到时才建（要建文件夹、读位置缓存）。"""
+    global _instance
+    if _instance is None:
+        _instance = ImageStore()
+    return _instance

@@ -10,10 +10,12 @@ POOLS = {
     '22': ('光锥联动跃迁', 80, 'getLdGachaLog'),
     '2':  ('新手跃迁',     50, 'getGachaLog'),
 }
+SHORT = {'11': '角色', '12': '光锥', '1': '常驻', '21': '角色联动', '22': '光锥联动', '2': '新手'}   # 标签页、图例用的简称
 
 LOG_DIRS = [os.path.expandvars(r'%USERPROFILE%\AppData\LocalLow\miHoYo\崩坏：星穹铁道'),
             os.path.expandvars(r'%USERPROFILE%\AppData\LocalLow\Cognosphere\Star Rail')]
 URL_RE = re.compile(rb'https://[^\x00\s"<>]+?/get(?:Ld)?GachaLog\?[^\x00\s"<>]+')
+
 
 @functools.cache
 def _opener():
@@ -31,7 +33,8 @@ def game_data_dirs():
     for d in LOG_DIRS:
         for name in ('Player.log', 'Player-prev.log'):
             try:
-                text = open(os.path.join(d, name), encoding='utf-8', errors='ignore').read()
+                with open(os.path.join(d, name), encoding='utf-8', errors='ignore') as f:
+                    text = f.read()
             except OSError:
                 continue
             for m in re.findall(r'([A-Za-z]:[/\\][^\r\n:"]*?StarRail_Data)', text):
@@ -48,7 +51,8 @@ def find_url_in_cache():
         caches += glob.glob(os.path.join(d, 'webCaches', '*', 'Cache', 'Cache_Data', 'data_2'))
     for f in sorted(caches, key=os.path.getmtime, reverse=True):
         try:
-            data = open(f, 'rb').read()
+            with open(f, 'rb') as fp:
+                data = fp.read()
         except OSError:
             continue
         urls = [u for u in URL_RE.findall(data) if b'authkey=' in u]
@@ -74,7 +78,7 @@ def _get(base, query, path, gacha_type, end_id):
                 resp = json.load(r)
         except Exception as e:
             if attempt == 5:
-                raise GachaError(f'连不上米哈游服务器：{e}')
+                raise GachaError(f'连不上米哈游服务器：{e}') from e
             time.sleep(1 + attempt); continue
         code = resp.get('retcode')
         if code == 0 and resp.get('data') is not None:

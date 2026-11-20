@@ -1,7 +1,7 @@
-# 崩铁抽卡统计：读游戏缓存里的跃迁链接 → 拉取记录存到本地 → 统计保底、歪没歪；头像墙和海报模式展示五星
+# 崩铁抽卡统计：读游戏缓存里的跃迁链接 → 拉取记录存到本地 → 统计保底、歪没歪；头像墙、海报模式展示五星
 import os, sys, threading, traceback
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QFontDatabase
+from PySide6.QtGui import QColor, QCursor, QGuiApplication, QIcon, QFontDatabase
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QVBoxLayout, QWidget, QStackedWidget, QTableWidgetItem, QHeaderView,
                                QAbstractItemView)
 if __name__ == '__main__' and QApplication.instance() is None:
@@ -9,48 +9,22 @@ if __name__ == '__main__' and QApplication.instance() is None:
     # 让后台线程去扫，和下面导入界面库（约 0.4 秒）同时进行。（在后台连字体文件也加载的话会和界面线程抢锁，反而更慢）
     _app = QApplication(sys.argv)
     threading.Thread(target=QFontDatabase.families, daemon=True).start()
-from qfluentwidgets import (SimpleCardWidget, CaptionLabel, BodyLabel, StrongBodyLabel, TitleLabel, SubtitleLabel,
-                            PrimaryPushButton, PushButton, ComboBox, SegmentedWidget, TableWidget, ProgressBar,
-                            IndeterminateProgressBar, SmoothScrollArea, InfoBar, InfoBarPosition, MessageBoxBase,
+from qfluentwidgets import (SimpleCardWidget, BodyLabel, SubtitleLabel, PrimaryPushButton, PushButton, ComboBox,
+                            SegmentedWidget, TableWidget, IndeterminateProgressBar, InfoBar, InfoBarPosition, MessageBoxBase,
                             PlainTextEdit, FluentIcon as FIF, isDarkTheme, qconfig, RoundMenu, Action, FlowLayout,
-                            PillPushButton, LineEdit, CheckBox)
+                            PillPushButton, LineEdit)
 import gacha_api, store, stats
-from gacha_api import POOLS
+from gacha_api import POOLS, SHORT
 from images import images
-from posters import AvatarWall, PosterFlow, FiveTile, SHORT
+from posters import AvatarWall, FiveTile, PosterPage
 from charts import MonthlyChart
+from widgets import SIDE_MARGIN, muted, StatCard, card_row, section, scroll_of
 from fluent_ui import make_app, Window, show_window, single_instance
 
 ALWAYS_SHOWN = ('11', '12', '1')          # 联动池、新手池有记录才显示
 GOLD, PURPLE = QColor('#d9952a'), QColor('#8e5fd6')
-VERSION = '2026.10.21'                    # 日历版本号：发布当天的日期，同一天再发就加 .1、.2
+VERSION = '2026.11.20'                    # 日历版本号：发布当天的日期，同一天再发就加 .1、.2
 JADE_PER_PULL = 160
-SIDE_MARGIN = 16                          # 窗口左右留白；海报模式的卡片不受这个限制，铺到窗口边
-
-
-class StatCard(SimpleCardWidget):
-    def __init__(self, title, parent=None):
-        super().__init__(parent)
-        v = QVBoxLayout(self)
-        v.setContentsMargins(16, 12, 16, 12); v.setSpacing(2)
-        self.title = CaptionLabel(title)
-        self.title.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 160))
-        self.value = TitleLabel('—')
-        self.sub = CaptionLabel('')
-        self.sub.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 160))
-        self.bar = ProgressBar(useAni=False)
-        self.bar.hide()
-        for w in (self.title, self.value, self.sub, self.bar):
-            v.addWidget(w)
-        v.addStretch(1)
-
-    def set(self, value, sub='', bar=None):
-        self.value.setText(str(value))
-        self.sub.setText(sub)
-        if bar is None:
-            self.bar.hide()
-        else:
-            self.bar.show(); self.bar.setRange(0, bar[1]); self.bar.setValue(min(bar[0], bar[1]))
 
 
 def pity_text(s):
@@ -70,37 +44,6 @@ def pity_text(s):
 def off_text(s):
     n = s.not_off + s.off
     return f'不歪 {s.not_off} · 歪 {s.off}', (f'小保底不歪率 {s.not_off / n:.0%}' if n else '还没有小保底的记录')
-
-
-def card_row(*cards):
-    h = QHBoxLayout(); h.setSpacing(10)
-    for c in cards:
-        h.addWidget(c, 1)
-    return h
-
-
-def section(title, extra=None):
-    """一张卡片 + 标题行，返回 (卡片, 放内容的竖向布局, 标题右侧的说明文字)。"""
-    card = SimpleCardWidget()
-    v = QVBoxLayout(card); v.setContentsMargins(16, 12, 16, 12); v.setSpacing(8)
-    head = QHBoxLayout(); head.setSpacing(12)
-    head.addWidget(StrongBodyLabel(title))
-    note = CaptionLabel('')
-    note.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 160))
-    head.addWidget(note); head.addStretch(1)
-    if extra is not None:
-        head.addWidget(extra)
-    v.addLayout(head)
-    return card, v, note
-
-
-def scroll_of(widget):
-    s = SmoothScrollArea(); s.setWidgetResizable(True); s.setWidget(widget)
-    s.setStyleSheet('QScrollArea{background:transparent;border:none}')
-    # 只透明这一层：不带选择器的 background:transparent 会传给里面的提示框，提示框就变成一个黑框
-    widget.setObjectName('scrollBody')
-    widget.setStyleSheet('#scrollBody{background:transparent}')
-    return s
 
 
 class PoolPage(QWidget):
@@ -276,45 +219,6 @@ class Overview(QWidget):
         self.empty.setVisible(total == 0)
 
 
-class PosterPage(QWidget):
-    """海报模式：每个五星一张大卡片，左右滑动。上面勾选要看哪些卡池，可以任意组合。卡片一直铺到窗口左右边缘。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        v = QVBoxLayout(self); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(6)
-        top = QHBoxLayout(); top.setContentsMargins(SIDE_MARGIN, 0, SIDE_MARGIN, 0); top.setSpacing(18)
-        self.checks = {}
-        for gt in POOLS:
-            c = CheckBox(SHORT[gt]); c.setChecked(True)
-            c.stateChanged.connect(lambda *_: self.apply())
-            top.addWidget(c)
-            self.checks[gt] = c
-        self.counter = CaptionLabel('')
-        self.counter.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 160))
-        top.addStretch(1); top.addWidget(self.counter)
-        v.addLayout(top)
-        self.flow = PosterFlow()
-        self.flow.focusChanged.connect(lambda i, n: self.counter.setText(f'第 {i} / {n} 个五星　·　滚轮、拖动或 ← → 切换，点卡片跳过去'))
-        v.addWidget(self.flow, 1)
-        self.st = {}
-
-    def set_data(self, st):
-        self.st = st
-        for gt, c in self.checks.items():
-            c.setVisible(st[gt].total > 0)
-        self.apply()
-
-    def apply(self):
-        """新手跃迁的五星一定是最早的，放最前；然后是没有时间的（截图导入的），其余按时间排。"""
-        chosen = [gt for gt, c in self.checks.items() if c.isChecked() and gt in self.st]
-        newbie = self.st['2'].fives if '2' in chosen else []
-        rest = [f for gt in chosen if gt != '2' for f in self.st[gt].fives]
-        fives = newbie + [f for f in rest if not f.time] + sorted((f for f in rest if f.time), key=lambda f: f.time)
-        self.flow.set_data(fives)
-        if not fives:
-            self.counter.setText('没有勾选卡池' if not chosen else '')
-
-
 class PoolDialog(MessageBoxBase):
     """歪池设置：选出你在游戏「星缘相邀」里选的角色。"""
     KNOWN = ['云璃', '希儿', '银狼', '刃', '符玄', '银枝']      # 目前「星缘相邀」能选的旧限定（用户 2026-10-20 给的名单）
@@ -394,16 +298,15 @@ class App(Window):
         super().__init__(f'崩铁抽卡统计  {VERSION}')
         self.setWindowIcon(QIcon(os.path.join(store.RES, 'icon.ico')))
         self.settings = store.load_settings()
-        self.resize(*self.settings.get('size', (1180, 800)))
         self.setMinimumSize(980, 660)
+        self.center_on_screen(*self.settings.get('size', (1180, 800)))
         m = self.body.contentsMargins()            # 左右留白交给各行自己加，海报模式才能铺到窗口边
         self.body.setContentsMargins(0, m.top(), 0, m.bottom())
 
         top = QHBoxLayout(); top.setSpacing(8); top.setContentsMargins(SIDE_MARGIN, 0, SIDE_MARGIN, 0)
         self.uid_box = ComboBox(); self.uid_box.setMinimumWidth(170)
         self.uid_box.currentIndexChanged.connect(lambda _: self.refresh())
-        self.status = CaptionLabel('')
-        self.status.setTextColor(QColor(0, 0, 0, 150), QColor(255, 255, 255, 160))
+        self.status = muted()
         self.btn_folder = PushButton(FIF.PHOTO, '图片文件夹')
         self.btn_folder.setToolTip('自定义海报和头像：把图片按角色名命名放进「自定义」文件夹')
         self.btn_folder.clicked.connect(lambda: os.startfile(os.path.join(store.HERE, '图片', '自定义')))
@@ -474,9 +377,7 @@ class App(Window):
             self.tabs.items[gt].setVisible(gt in ALWAYS_SHOWN or st[gt].total > 0)
         self.posters.set_data(st)
         images().forget()           # 「自定义」里可能放了新图
-        # 提前把要用的图都排进下载队列
-        items = {(f.item_id, f.name) for s in st.values() for f in s.fives}
-        images().request([(k, i, n) for i, n in items for k in ('avatar', 'poster')])
+        images().request({(f.item_id, f.name) for s in st.values() for f in s.fives})     # 提前把要用的图都排进下载队列
         self.status.setText(f'上次更新：{doc["updated_at"]}' if doc.get('updated_at') else '')
 
     # ---------- 歪没歪 ----------
@@ -557,6 +458,15 @@ class App(Window):
         self._idle()
         self.refresh()
         InfoBar.error('更新失败', msg, duration=-1, position=InfoBarPosition.TOP, parent=self)
+
+    def center_on_screen(self, w, h):
+        """在鼠标所在的屏幕居中打开；上次的窗口比这块屏幕大（换了小屏）就缩到放得下"""
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()              # 去掉任务栏
+        w = max(self.minimumWidth(), min(w, area.width()))
+        h = max(self.minimumHeight(), min(h, area.height()))
+        # 用 setGeometry 摆可见区域：无边框窗口的 frameGeometry 比可见区域还小一圈，move() 会偏 8 像素
+        self.setGeometry(area.x() + (area.width() - w) // 2, area.y() + (area.height() - h) // 2, w, h)
 
     def closeEvent(self, e):
         self.settings.update(uid=self.uid(), size=[self.width(), self.height()])
